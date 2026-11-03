@@ -26,7 +26,7 @@ int main(int argc, char *argv[]) {
 	fd = open(filename, O_RDONLY | O_CLOEXEC, 0);
 	if (fd == -1) {
 		perror("can't open that ...");
-		return -1;
+		return 1;
 	}
 
 	int buffer_size = 1024;
@@ -47,20 +47,5 @@ int main(int argc, char *argv[]) {
 	if (bytes_read < 0) {
 		// a read error or some
 	}
+	close(fd);
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
