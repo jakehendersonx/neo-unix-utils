@@ -1,18 +1,22 @@
 # unix-utils
 
+Custom implementations of classic UNIX cli utils and a few more useful ones.
 
-Coding classic unix utility programs in C. 
-Occassionally adding better output and messaging. 
+The rules: 
+- yes C std lib
+- yes UNIX/POSIX interfaces
+- no third parties.
 
-### utils
 
-touch - open
-ls    - openat, getdents, close, write, fstat / fcntl
-cat   - fopen, fgetc, putchar
+### classic utils
+
+touch - open, utimensat, close
+ls    - opendir, readdir, closedir, stat, lstat
+cat   - open, read, write, close
 mkdir - mkdir
-mv    - stat, rename
-rm    - lstat, unlink, rmdir, opendir, readdir
-find  - lstat, strstr, opendir, readdir
+mv    - rename
+rm    - unlink, rmdir, lstat, opendir, readdir, closedir
+find  - lstat, opendir, readdir, closedir, fnmatch
 
 ### installing system wide
 
