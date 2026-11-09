@@ -1,0 +1,261 @@
+NSERVE: MINIMAL STATIC FRONTEND SERVER
+
+Purpose
+
+Extend nserve/nserve.c so a browser can load a complete static frontend from a
+chosen directory: HTML, JavaScript, CSS, images, fonts, and other static files.
+This document is the implementation brief; no earlier conversation is needed.
+
+Repository constraints: C standard library and UNIX/POSIX interfaces only, with
+no third-party dependencies. This is a small learning project. Prefer explicit
+control flow, plain data structures, small functions, and bounded buffers.
+
+Build tools remain separate. For a bundled frontend, build it with its own tools
+first and point nserve at the output directory. Serving source files does not
+compile TypeScript, resolve package imports, or provide a framework runtime.
+
+Current implementation
+
+- Everything lives in nserve/nserve.c. nserve/index.html is a sample page.
+- The command accepts an optional port, defaulting to 8080 (range 1024-65535).
+- It binds to 127.0.0.1 and handles one accepted connection at a time.
+- It reads bounded HTTP headers across multiple recv() calls, accepts GET/HEAD,
+  strips query parameters, and serves only / and /index.html.
+- It opens index.html relative to the working directory and labels all responses
+  text/html. It already streams files in chunks and handles partial sends.
+- It has a five-second receive timeout, ignores SIGPIPE, and stops on SIGINT.
+
+Keep the useful plumbing. The main change is URL-to-file resolution, not a new
+networking architecture.
+
+1. Deliver the smallest complete version
+
+- Command syntax: nserve [port [directory]]. Defaults: 8080 and the current
+  directory. Examples: nserve; nserve 9000; nserve 8080 ./dist.
+- Keep binding to loopback. Print the selected root and listening URL at startup.
+- Open the root directory once at startup; fail clearly if it cannot be opened.
+- Support GET and HEAD, one request per connection, then close the connection.
+- Serve regular files anywhere beneath the root, with the right content type.
+- Serve index.html inside directories. Do not produce directory listings.
+- Keep the accept loop sequential for this version. Multiple browser requests
+  can be handled sequentially; concurrency is not required for correctness.
+
+Do not add configuration files, TLS, compression, caching, ranges, keep-alive,
+uploads, reverse proxying, live reload, or a general-purpose HTTP framework.
+SPA fallback and concurrency are separate optional follow-ups below.
+
+2. Organize data with plain structs
+
+Keep implementation in nserve.c initially. These are data records, not objects:
+no method pointers, inheritance, generic interfaces, or layers of wrappers.
+
+Server:
+  - listen_fd: listening socket, initially -1.
+  - root_fd: open document-root directory, initially -1.
+  - port: validated port number.
+  - failed: whether a fatal server error occurred.
+
+Request:
+  - head_only: true for HEAD.
+  - target: bounded, validated original request target, including its query.
+  - path: bounded decoded path, with the query removed.
+
+File:
+  - fd: owned open regular-file descriptor, initially -1.
+  - size: off_t from fstat().
+  - content_type: pointer to a constant MIME string.
+
+Use a small enum for resolver outcomes: file ready, directory redirect, missing,
+forbidden, and internal error. Avoid overloading one return value with unrelated
+meanings. A redirect does not leave an open descriptor in File.
+
+Keep scratch buffers local. Add fields only when another stage actually needs
+the data. Do not store request/client state globally or allocate entire files.
+
+3. Make the request flow easy to follow
+
+The client handler should read like this:
+  configure timeouts -> read headers -> parse request -> decode path
+  -> resolve file -> send headers -> stream body -> release resources.
+
+Suggested function responsibilities (names are suggestions, not an API contract):
+- read_request: collect headers within a fixed limit; handle fragmented reads.
+- parse_request: validate the request line and populate Request.
+- decode_path: remove the query, decode percent escapes, validate components.
+- resolve_file: walk from root_fd, handle directories, and populate File.
+- mime_type: map the actual served file's extension to a constant string.
+- send_headers / send_error / send_redirect: format bounded HTTP responses.
+- stream_file: reuse the current read() plus send_all() loop.
+- handle_client: coordinate these steps and cleanup.
+
+Use normal functions operating on these records. Keep trivial operations inline
+where extracting them would obscure the flow. Keep existing helpers when useful.
+
+4. Parse only the HTTP subset needed here
+
+- Retain a 4096-byte header buffer, including space for the terminating NUL.
+  Reject headers that exceed the limit with 431.
+- Parse the request line through its first CRLF. Require exactly method, target,
+  and HTTP version; reject truncated tokens and extra tokens with 400.
+- Accept HTTP/1.0 and HTTP/1.1. Accept only origin-form targets beginning with
+  a single slash. Reject absolute URLs, leading //, fragments, embedded NULs,
+  raw control characters, and malformed request lines.
+- Support GET and HEAD. For other methods return 405 with Allow: GET, HEAD.
+- Never interpret a request body or process another request on that connection.
+  Read only through the header terminator and ignore any subsequent bytes.
+- Once HEAD is recognized, suppress bodies on success, redirects, and errors.
+  Content-Length must still describe the body that GET would have returned.
+
+Keep response framing explicit: HTTP status line, Content-Type, Content-Length,
+Connection: close, any needed Allow or Location header, then CRLF CRLF.
+Error bodies can be short plain-text status messages.
+
+5. Resolve paths safely and predictably
+
+Separate URL handling from filesystem handling:
+- Split off the query BEFORE percent decoding. A literal '+' stays '+'.
+- Decode %HH exactly once. Reject incomplete/invalid escapes, decoded NULs,
+  control characters, and backslashes. Never decode the resulting text again.
+- Validate after decoding, so encoded slashes and encoded dot segments cannot
+  bypass checks. Reject any component equal to '..' with 403.
+- Skip empty components and '.' components. Preserve whether the path ends in
+  a slash. The leading URL slash never becomes an absolute filesystem path.
+- Check every destination buffer before writing. An overlong target/path gets
+  414; overlong overall headers still get 431.
+
+Open the configured root with O_RDONLY | O_DIRECTORY. Resolve each component
+relative to a directory descriptor using openat(), never by concatenating an
+absolute path or changing the process working directory.
+
+For intermediate components use O_DIRECTORY | O_NOFOLLOW. Open the final
+component with O_NOFOLLOW and O_NONBLOCK, then fstat() it. O_NONBLOCK avoids
+getting stuck opening a FIFO before discovering it is not a regular file.
+Only serve regular files; directories have the special handling below. Close
+all temporary descriptors on every exit path. Never follow a symlink inside
+the document root, including a symlink named index.html.
+
+This deliberately excludes symlinked frontend assets. The configured root itself
+is trusted operator input; its initial open may follow a symlink.
+
+Missing paths, non-directory intermediate components, inaccessible entries,
+symlinks, and unsupported file kinds can all return 404. Use 403 for explicit
+traversal rejection, and 500 for unexpected internal/resource failures. Do not
+expose filesystem paths in HTTP error bodies.
+
+Directory behavior:
+- / -> root/index.html.
+- /docs/ -> docs/index.html.
+- /docs -> 301 redirect to /docs/ when docs is a directory.
+- A directory with no regular, readable index.html returns 404.
+- /file.txt/ returns 404 if file.txt is a regular file.
+
+Build redirect Location from the validated ORIGINAL encoded path, appending '/'
+before any query string. Preserve the query. Never insert the decoded path into
+headers: it may contain bytes that were escaped in the URL. Location must remain
+a local path beginning with a single slash. Bound and check its formatting.
+
+6. Serve files with correct metadata and bounded memory
+
+Use a small static extension table, with case-insensitive matching:
+  .html, .htm     text/html; charset=utf-8
+  .css           text/css; charset=utf-8
+  .js, .mjs      text/javascript; charset=utf-8
+  .json, .map    application/json
+  .svg           image/svg+xml
+  .png           image/png
+  .jpg, .jpeg    image/jpeg
+  .gif           image/gif
+  .webp          image/webp
+  .ico           image/vnd.microsoft.icon
+  .woff          font/woff
+  .woff2         font/woff2
+  .wasm          application/wasm
+  .txt           text/plain; charset=utf-8
+  otherwise      application/octet-stream
+
+Use the resolved index.html name when serving a directory. Do not append a
+charset to binary types. Do not inspect or transform file contents.
+
+Use fstat() on the opened descriptor for Content-Length, including zero-byte
+files. Retain off_t and the existing intmax_t formatting. Stream at most that
+many bytes in fixed-size chunks; retry interrupted reads and writes. If the file
+shrinks or a transfer fails after headers are sent, close the connection rather
+than attempting to send a second HTTP response.
+
+7. Keep ownership and failure handling explicit
+
+- main/server setup owns listen_fd and root_fd and closes both on exit.
+- The accept loop owns the accepted socket and closes it after handle_client.
+- The resolver owns temporary directory descriptors and transfers only a
+  successful regular-file descriptor to File.
+- The client handler closes File.fd after success or any response failure.
+- All descriptor fields start at -1; use a clear cleanup path when needed.
+- A client error must not set Server.failed or terminate the server.
+- Keep SIGPIPE ignored and use sigaction() for shutdown signals. Keep signal
+  handlers limited to setting a volatile sig_atomic_t flag.
+- Add a five-second SO_SNDTIMEO alongside SO_RCVTIMEO. Check setup failures.
+  These bound individual blocking I/O waits, not total request duration; do not
+  describe them as an absolute deadline. Stop EINTR retries when shutting down.
+
+8. Implement in small, reviewable steps
+
+1) Extend argument handling and Server with root_fd; update startup/cleanup.
+2) Introduce Request and isolate bounded header/request-line parsing.
+3) Implement decoding and component validation.
+4) Implement descriptor-relative resolution, indexes, and directory redirects.
+5) Add File and MIME lookup; generalize headers; reuse file streaming.
+6) Finish HEAD/error handling, send timeout, and shutdown/cleanup review.
+7) Verify the behavior below and update the introductory source comment.
+
+Build from the repository root with:
+  clang -std=c11 -Wall -Wextra -Wpedantic nserve/nserve.c -o /tmp/nserve
+
+Do not add a build system or dependencies solely for this change.
+
+9. Verify observable behavior
+
+Use a temporary fixture root containing index.html, nested CSS/JS, a binary
+image, an empty file, a name containing a space, and docs/index.html. Keep test
+artifacts outside the repository. Start /tmp/nserve 8080 <fixture-root>.
+
+- Load the fixture in a browser: nested scripts/styles/images succeed and have
+  correct Content-Type. Confirm binary downloads match the source byte-for-byte.
+- Check GET /, nested files, /docs/, and /docs?x=1 redirecting to /docs/?x=1.
+- Check HEAD against GET: same status/metadata, zero body, including errors.
+- Check queries do not affect lookup, and /hello%20world.txt resolves correctly.
+- Check missing assets/directories return 404 and unsupported methods return
+  405 with Allow. Check empty files have Content-Length: 0.
+- Use curl --path-as-is for traversal checks: /../outside and /%2e%2e/outside
+  must be rejected. Also check encoded separators, malformed escapes, %00,
+  symlinked files/directories/indexes, and /file.txt/.
+- Use a tiny socket client to split headers across sends and exercise malformed
+  request lines, raw NULs, excessive headers, and idle connections.
+- Disconnect during a download, then request another file: server still works.
+- Repeat requests and inspect descriptor usage for leaks. Check Ctrl+C exits
+  and the port can be reused. Confirm original nserve [port] usage still works.
+
+The core change is done when a built frontend loads with correct assets, paths
+stay beneath the root, response lengths/types are correct, and resources close
+reliably. A frontend build directory is expected to remain stable while served.
+
+10. Optional follow-ups; not required for the core implementation
+
+SPA routing:
+- Add an explicit opt-in switch only when needed. Default remains real files
+  and directory indexes. Document a precise fallback rule before implementing
+  it; missing JS/CSS/images must continue returning 404. An HTML Accept header
+  alone is not enough to identify navigation, since missing assets can also be
+  requested directly. Do not silently turn every missing file into index.html.
+
+Concurrency:
+- First measure the sequential version with a real browser. Idle speculative
+  connections or large downloads can delay later requests despite timeouts.
+- If useful, add a bounded fork-per-connection design before considering a
+  thread pool. Keep the file-serving handler independent of that choice.
+- Parent owns the listener and closes each accepted socket after forking; child
+  closes its inherited listener, handles one request using its inherited root,
+  closes resources, and exits with _exit(). Track/reap children in the parent,
+  set a small fixed concurrency cap, and define shutdown behavior explicitly.
+  Use only async-signal-safe operations in any signal handlers.
+- This is a separate lifecycle change. Complete and verify the static-serving
+  behavior before introducing process bookkeeping or shared-state concerns.

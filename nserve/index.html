@@ -3,9 +3,28 @@
 	<head>
 		<meta charset="UTF-8">
 		<meta name="viewport" content="width=device-width, initial-scale=1.0">
-		<title>hello</title>
+		<title>nserve · A little motion</title>
+		<link rel="stylesheet" href="style.css">
+		<script src="cube.js" defer></script>
 	</head>
 	<body>
-		<h1>hello</h1>
+		<main>
+			<p class="eyebrow">NSERVE / STATIC DEMO</p>
+			<h1>A little motion.</h1>
+			<p class="intro">Six faces. Three files. One tiny server.</p>
+			<div class="scene" role="img" aria-label="A rotating blue three-dimensional cube">
+				<div class="cube" aria-hidden="true">
+					<div class="face front">01</div>
+					<div class="face back">02</div>
+					<div class="face right">03</div>
+					<div class="face left">04</div>
+					<div class="face top">05</div>
+					<div class="face bottom">06</div>
+				</div>
+			</div>
+			<button id="toggle" type="button" disabled>Play rotation</button>
+			<noscript><p>Enable JavaScript to set the cube in motion.</p></noscript>
+			<p class="caption">HTML sets the stage. CSS shapes the cube. JavaScript spins it.</p>
+		</main>
 	</body>
 </html>
