@@ -7,7 +7,6 @@ The rules:
 - yes UNIX/POSIX interfaces
 - no third parties.
 
-
 ### classic utils
 
 touch - open, utimensat, close
@@ -17,6 +16,11 @@ mkdir - mkdir
 mv    - rename
 rm    - unlink, rmdir, lstat, opendir, readdir, closedir
 find  - lstat, opendir, readdir, closedir, fnmatch
+
+### more
+
+nserve - http.server replacement for quick file servers and frontends
+ninfo  - custom info page
 
 ### installing system wide
 
