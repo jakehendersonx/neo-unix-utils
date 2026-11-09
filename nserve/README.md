@@ -17,6 +17,10 @@ Primarily for displaying static frontends.
 - help flag w examples -h --help
 - C / POSIX minimal implementation
 
+ ### Next Features
+ - File System serving and sharing over network
+
+
  ### What neoserve DOES NOT do that http.server does
  - concurrent clients w threaded request handling
  - directory listings when no index file exists
